@@ -1,0 +1,30 @@
+{
+  "auth_type": "HMAC_SHA256",
+  "response_envelope": "hotels.hotels[]",
+  "id_field": "code",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "limit_offset",
+    "default_limit": 20,
+    "params": [
+      "from",
+      "to"
+    ]
+  },
+  "required_search_params": [
+    "from",
+    "to",
+    "language"
+  ],
+  "common_errors": [
+    {
+      "symptom": "Empty results",
+      "cause": "Sandbox only knows specific test destination codes"
+    },
+    {
+      "symptom": "401 auth error",
+      "cause": "Time skew in HMAC signature - use server timestamp"
+    }
+  ],
+  "notes": "Double-nested response envelope with offset pagination"
+}

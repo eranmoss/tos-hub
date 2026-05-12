@@ -1,0 +1,37 @@
+{
+  "activities": [
+    {
+      "activityCode": "E-BCN-SAGR",
+      "name": "Sagrada Familia Premium Tour",
+      "category": { "code": "CULTURE", "groupCode": "CULTURE" },
+      "location": {
+        "latitude": 41.4036,
+        "longitude": 2.1744,
+        "description": "Barcelona, Catalonia",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "cancellationPolicies": [
+        { "hoursBeforeDateTime": 48, "percent": 0 },
+        { "hoursBeforeDateTime": 24, "percent": 50 }
+      ],
+      "modalities": [
+        {
+          "name": "Standard Guided Tour",
+          "duration": { "value": 2, "unit": "HOURS" },
+          "amounts": [{ "amount": 55 }],
+          "availabilityQuota": 20,
+          "cancellationPolicies": [
+            { "hoursBeforeDateTime": 48, "percent": 0 }
+          ]
+        },
+        {
+          "name": "Premium Small Group",
+          "duration": { "value": 3, "unit": "HOURS" },
+          "amounts": [{ "amount": 95 }],
+          "availabilityQuota": 8
+        }
+      ]
+    }
+  ]
+}

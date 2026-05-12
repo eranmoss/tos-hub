@@ -1,0 +1,15 @@
+{
+  "auth_type": "HMAC_SHA256",
+  "response_envelope": "unknown (no sample data)",
+  "id_field": "unknown",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "limit_offset",
+    "default_limit": 20
+  },
+  "required_search_params": [
+    "destination"
+  ],
+  "common_errors": [],
+  "notes": "Standard HotelBeds HMAC auth with timestamp signatures"
+}

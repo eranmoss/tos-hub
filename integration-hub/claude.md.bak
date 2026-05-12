@@ -1,0 +1,1617 @@
+# TOS Integration Hub — Product Requirements Document
+# Version 1.4 | April 2026 | WanderVault / EMOSS Consulting
+# Optimised for Claude Code — authoritative specification
+
+---
+
+## 1. What This Is
+
+The TOS Integration Hub is the L4 execution layer of the Travel Operating
+System. It is the single gateway through which all external supplier APIs,
+OTA connections, and B2B partner integrations flow into TOS.
+
+Phase 1 ships four integrations across two providers:
+- Bridgify Experiences
+- HotelBeds Hotels
+- HotelBeds Experiences (Tours & Activities)
+- HotelBeds Transfers
+
+---
+
+## 2. TOS Layer Model
+
+| Layer | Owner | Role |
+|-------|-------|------|
+| L5 | TOS | Intelligence, decisioning |
+| L4 | Integration Hub | Execution, orchestration ← THIS COMPONENT |
+| L3 | Bridgify | Normalization, schema translation |
+| L2 | Bridgify | Connectivity, protocol adapters |
+| L1 | Suppliers | Raw APIs (HotelBeds, Bridgify, etc.) |
+
+---
+
+## 3. Architecture Components
+
+### 3.1 API Layer (Express)
+- Single entry point for all inbound calls
+- Auth: X-Api-Key header validated via bcrypt against hub_tenants.api_key_hash
+- Rate limiting: per-tenant from hub_tenants.rate_limit_rpm
+- All 19 endpoints defined in Section 10
+
+### 3.2 Router / Dispatch (OpenClaw logic)
+- Loads tenant config from hub_tenants (throws if tenant_id missing)
+- Classifies task: SYNC | ASYNC | SCHEDULED
+- SYNC → Executor (sync.js) — supplier_count <= 2, complexity LOW
+- ASYNC → Managed Agent (Claude API) — supplier_count > 2 OR complexity HIGH
+- SCHEDULED → triggered by internal scheduler (no cloud scheduler dependency)
+- Emits structured JSON log on every dispatch
+
+### 3.3 Executor (Sync)
+- Handles: search, detail, availability, book, get, cancel
+- For SEARCH: executes two-stage pipeline (see Section 3B.3)
+  Stage 1: local filter against hub_static_inventory
+  Stage 2: live reprice batched call to supplier
+- For BOOK/CANCEL/GET: direct supplier call (no local cache involved)
+- Fetches credentials via getSecret() adapter — never AWS SDK directly
+- Runs normalization pipeline on live responses
+- Writes to hub_transactions (always with tenant_id)
+- Returns CTS-normalized response (static content + live pricing merged)
+
+### 3.4 Normalization Pipeline
+Four stages applied to every supplier response:
+1. PARSE — apply field mappings from mappings/ files
+2. ENRICH — resolve codes, infer timezone, preserve supplier_raw_ref
+3. NORMALIZE — USD conversion, UTC timestamps, CTS enum mapping
+4. VALIDATE — Zod schema validation, log failures, never silently drop
+
+### 3.5 Database (Postgres)
+- Connection via DATABASE_URL env var only — never hardcoded
+- All queries include WHERE tenant_id = $1 — throw if tenantId missing
+- Full schema in Section 9
+
+### 3.6 Secrets Adapter (src/infra/secrets.js)
+- Local (NODE_ENV !== 'production'): reads process.env
+- Production: reads AWS Secrets Manager
+- AWS SDK imported dynamically only in this file — never elsewhere
+- All other code calls getSecret(path) — cloud-agnostic interface
+
+### 3.7 Notify Adapter (src/infra/notify.js)
+- Wraps Resend API
+- Used for: onboarding completion, validation failures, escalations,
+  disruption alerts
+- Per-tenant sender identity configured in hub_tenants
+
+---
+
+## 3B. Static Inventory Cache — Architecture
+
+### 3B.1 Design Principle
+
+The Integration Hub maintains a local static inventory cache in Postgres
+for all Phase 1 suppliers. This cache stores supplier content data that
+changes infrequently (hotel names, descriptions, coordinates, experience
+categories, transfer routes). Live pricing and availability are always
+fetched on-demand — they are never cached.
+
+This hybrid model is both contractually required (HotelBeds TOS prohibits
+caching live pricing) and architecturally sound — serving search results
+from local data reduces latency from ~3s to ~500ms and enables offline
+browsing during supplier outages.
+
+### 3B.2 What Is Cached vs. What Is Always Live
+
+| Data Type | Source | Storage | Refresh |
+|-----------|--------|---------|---------|
+| Hotel name, description, photos, geo, amenities, star rating | HotelBeds Content API | hub_static_inventory | Nightly full sync |
+| Experience name, description, category, duration, location | HotelBeds Activities API / Bridgify | hub_static_inventory | Nightly full sync |
+| Transfer routes, vehicle types, origin/destination | HotelBeds Transfers API | hub_static_inventory | Nightly full sync |
+| Live room rates, rateKey | HotelBeds Booking API | Never stored | Per search |
+| Live availability, seats | All booking APIs | Never stored | Per search |
+| Cancellation policies | All booking APIs | Never stored | Per search |
+| Booking confirmation | All booking APIs | hub_transactions | At booking time |
+
+### 3B.3 Two-Stage Search Pipeline
+
+Every search request goes through two stages:
+
+```
+Stage 1 — Local Filter (target: < 30ms)
+  Input: search params (location, category, dates, occupancy, tenant_id)
+  Query: hub_static_inventory
+    WHERE supplier_slug IN (tenant's approved suppliers)
+    AND type = requested_type
+    AND is_active = true
+    AND geo within radius (PostGIS or haversine)
+    AND category matches (if specified)
+  Output: up to 100 candidate records with supplier_raw_ref values
+
+Stage 2 — Live Reprice (target: 300-600ms)
+  Input: candidate supplier_raw_refs grouped by supplier
+  Action: one batched live API call per supplier
+  Output: live pricing + availability per candidate
+  Merge: attach price/availability to static record
+  Filter: remove candidates with no availability
+
+Return: merged CTS results (static content + live pricing)
+```
+
+For experiences and transfers where pricing is less volatile, Stage 1
+results may be returned immediately with a "prices from X" indicator
+while Stage 2 completes asynchronously. Hotels always wait for Stage 2
+before returning results (rate key required for booking).
+
+### 3B.4 Offline Dedup
+
+Dedup is pre-computed nightly against the static inventory, not run
+under user search latency.
+
+The nightly sync worker, after inserting/updating hub_static_inventory,
+runs the composite scoring model across all candidate pairs within the
+same tenant's approved suppliers and stores results in hub_dedup_pairs.
+
+At search time, Stage 1 joins hub_dedup_pairs to attach pre-computed
+dedup decisions to candidate results. No scoring happens at query time.
+
+```
+Nightly:
+  For each tenant:
+    For each pair of active suppliers with overlapping categories:
+      For each record in hub_static_inventory (supplier A):
+        Find candidates in supplier B within location_radius_m
+        Run composite scoring
+        If score >= uncertain threshold: insert/update hub_dedup_pairs
+
+Search time:
+  Stage 1 query joins hub_dedup_pairs:
+    If result has a pre-computed duplicate → apply strategy immediately
+    If result has uncertain pair → return both with dedup metadata
+```
+
+### 3B.5 Sync Worker Design
+
+One sync worker per supplier. Workers run independently on a nightly
+schedule. Each worker is a standalone Node.js script in src/sync/.
+
+```
+src/sync/
+  base-sync.js               ← shared sync logic (batch, upsert, error handling)
+  hotelbeds-hotels.js        ← fetches HotelBeds Content API
+  hotelbeds-experiences.js   ← fetches HotelBeds Activities API
+  hotelbeds-transfers.js     ← fetches HotelBeds Transfers API
+  bridgify-experiences.js    ← fetches Bridgify content endpoint
+  dedup-precompute.js        ← runs after all content syncs complete
+```
+
+**Sync worker pattern (base-sync.js):**
+```js
+// Fetch in pages of 1000 records
+// For each page:
+//   1. Normalize each record to CTS static shape
+//   2. Upsert into hub_static_inventory
+//      (ON CONFLICT supplier_slug, supplier_raw_ref DO UPDATE)
+//   3. Records not seen in this run → set is_active = false (soft delete)
+//   4. Log progress to hub_sync_jobs
+//   5. Log individual record errors to hub_sync_errors (do not abort)
+// Never abort entire sync on single record failure
+// Mark sync complete in hub_sync_jobs regardless of partial errors
+```
+
+**Soft delete logic:**
+At start of sync, record all existing supplier_raw_refs for this supplier.
+At end of sync, any ref not seen in the response → UPDATE is_active = false.
+Never hard delete — preserves historical booking references.
+
+### 3B.6 New DB Tables
+
+```sql
+-- Static inventory store — CTS-shaped content for all suppliers
+CREATE TABLE hub_static_inventory (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_slug       VARCHAR NOT NULL REFERENCES hub_suppliers(supplier_slug),
+  supplier_raw_ref    VARCHAR NOT NULL,
+  type                VARCHAR NOT NULL,  -- HOTEL | EXPERIENCE | TRANSFER
+  title               VARCHAR NOT NULL,
+  description         TEXT,
+  latitude            FLOAT,
+  longitude           FLOAT,
+  city                VARCHAR,
+  country             VARCHAR,
+  timezone            VARCHAR,
+  category            VARCHAR,           -- experience_category for EXPERIENCE
+  duration_minutes    INTEGER,           -- EXPERIENCE
+  vehicle_class       VARCHAR,           -- TRANSFER
+  star_rating         FLOAT,             -- HOTEL
+  image_urls          TEXT[],
+  amenities           TEXT[],            -- HOTEL
+  meal_plans          TEXT[],            -- HOTEL (supported board codes)
+  route_origin        VARCHAR,           -- TRANSFER (IATA or location code)
+  route_destination   VARCHAR,           -- TRANSFER
+  raw_content         JSONB,             -- full supplier response preserved
+  is_active           BOOLEAN DEFAULT true,
+  last_synced_at      TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ DEFAULT now(),
+  updated_at          TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(supplier_slug, supplier_raw_ref)
+);
+
+-- Indexes for search performance
+CREATE INDEX idx_static_inventory_geo
+  ON hub_static_inventory (latitude, longitude)
+  WHERE is_active = true;
+
+CREATE INDEX idx_static_inventory_supplier_type
+  ON hub_static_inventory (supplier_slug, type)
+  WHERE is_active = true;
+
+CREATE INDEX idx_static_inventory_category
+  ON hub_static_inventory (category)
+  WHERE is_active = true;
+
+-- Pre-computed dedup pairs
+CREATE TABLE hub_dedup_pairs (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id           VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  inventory_id_a      UUID NOT NULL REFERENCES hub_static_inventory(id),
+  inventory_id_b      UUID NOT NULL REFERENCES hub_static_inventory(id),
+  composite_score     FLOAT NOT NULL,
+  decision            VARCHAR NOT NULL,  -- DUPLICATE | UNCERTAIN
+  signal_location     FLOAT,
+  signal_name         FLOAT,
+  signal_duration     FLOAT,
+  signal_category     FLOAT,
+  computed_at         TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(tenant_id, inventory_id_a, inventory_id_b)
+);
+
+CREATE INDEX idx_dedup_pairs_tenant_a
+  ON hub_dedup_pairs (tenant_id, inventory_id_a);
+
+-- Sync job tracking
+CREATE TABLE hub_sync_jobs (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_slug       VARCHAR NOT NULL,
+  status              VARCHAR DEFAULT 'RUNNING'
+                      CHECK (status IN ('RUNNING','COMPLETE','FAILED')),
+  records_fetched     INTEGER DEFAULT 0,
+  records_upserted    INTEGER DEFAULT 0,
+  records_deactivated INTEGER DEFAULT 0,
+  records_errored     INTEGER DEFAULT 0,
+  started_at          TIMESTAMPTZ DEFAULT now(),
+  completed_at        TIMESTAMPTZ,
+  error_message       TEXT
+);
+
+-- Per-record sync errors (never abort sync on single failure)
+CREATE TABLE hub_sync_errors (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_job_id         UUID NOT NULL REFERENCES hub_sync_jobs(id),
+  supplier_raw_ref    VARCHAR,
+  error_message       TEXT NOT NULL,
+  raw_record          JSONB,
+  created_at          TIMESTAMPTZ DEFAULT now()
+);
+```
+
+### 3B.7 Search Pipeline Implementation
+
+```js
+// src/search/pipeline.js
+
+export const search = async (params, tenant) => {
+
+  // Stage 1 — Local filter
+  const candidates = await db.query(`
+    SELECT
+      si.*,
+      dp.composite_score as dedup_score,
+      dp.decision as dedup_decision,
+      dp.inventory_id_b as dedup_pair_id
+    FROM hub_static_inventory si
+    LEFT JOIN hub_dedup_pairs dp
+      ON dp.inventory_id_a = si.id
+      AND dp.tenant_id = $1
+    JOIN hub_tenant_suppliers ts
+      ON ts.supplier_slug = si.supplier_slug
+      AND ts.tenant_id = $1
+      AND ts.is_active = true
+    WHERE si.type = $2
+      AND si.is_active = true
+      AND (
+        6371000 * acos(
+          cos(radians($3)) * cos(radians(si.latitude)) *
+          cos(radians(si.longitude) - radians($4)) +
+          sin(radians($3)) * sin(radians(si.latitude))
+        )
+      ) <= $5
+    LIMIT 100
+  `, [tenant.id, params.type, params.lat, params.lng, params.radius_m]);
+
+  if (candidates.rows.length === 0) return [];
+
+  // Stage 2 — Live reprice
+  const bySupplier = groupBy(candidates.rows, 'supplier_slug');
+  const liveResults = await Promise.all(
+    Object.entries(bySupplier).map(([slug, records]) =>
+      repriceFromSupplier(slug, records, params, tenant)
+    )
+  );
+
+  // Merge static + live
+  return mergePricedResults(candidates.rows, liveResults.flat(), tenant);
+};
+```
+
+### 3B.8 Estimated Static Inventory Size
+
+| Supplier | Type | Est. Records | Sync Duration |
+|----------|------|-------------|---------------|
+| HotelBeds Hotels | HOTEL | ~300,000 | 2-4 hours |
+| HotelBeds Experiences | EXPERIENCE | ~18,000 | 15-30 min |
+| HotelBeds Transfers | TRANSFER | ~24,000 routes | 20-40 min |
+| Bridgify Experiences | EXPERIENCE | TBC | TBC |
+| **Total** | | **~342,000+** | **~5 hours max** |
+
+Postgres with correct indexes handles this comfortably. No separate
+search infrastructure (Elasticsearch etc.) needed for Phase 1.
+
+### 3B.9 Failure Modes
+
+| Scenario | Search Behaviour | Booking Behaviour |
+|----------|-----------------|-------------------|
+| Supplier API down | Stage 1 returns static results with "live prices unavailable" flag | Blocked — cannot book without live price |
+| Partial supplier failure | Results from healthy suppliers returned | Only healthy suppliers bookable |
+| Sync worker fails | Stale static data served (last successful sync) | Live pricing still works |
+| DB slow | Stage 1 degraded — reduce candidate limit to 20 | Unaffected |
+
+### 3B.10 Licensing Boundaries
+
+**What we CAN cache per HotelBeds contract:**
+- Hotel names, descriptions, photos, coordinates, amenities
+- Activity names, descriptions, categories, duration
+- Transfer routes and vehicle types
+
+**What we CANNOT cache:**
+- Room rates or rateKeys
+- Live availability counts
+- Cancellation policies (these change with rate)
+- Any field returned by the Booking API (not Content API)
+
+Bridgify: confirm caching rights with Bridgify technical contact.
+Add TODO in sync worker until confirmed.
+
+
+---
+
+## 4. Phase 1 Supplier Integrations
+
+### 4.1 Bridgify — Experiences
+
+| Field | Value |
+|-------|-------|
+| Auth | API Key — header: X-Api-Key |
+| Sandbox base URL | TBC — set via BRIDGIFY_BASE_URL env var |
+| Env vars | BRIDGIFY_API_KEY, BRIDGIFY_BASE_URL |
+| CTS type | EXPERIENCE |
+| supplier_slug | bridgify |
+
+**Operations:**
+
+| Operation | Method | Endpoint | Execution |
+|-----------|--------|----------|-----------|
+| search | GET | /experiences/search | Sync |
+| detail | GET | /experiences/:id | Sync |
+| availability | GET | /experiences/:id/availability | Sync |
+| book | POST | /bookings | Sync |
+| get | GET | /bookings/:ref | Sync |
+| cancel | DELETE | /bookings/:ref | Sync |
+
+**CTS Field Mappings:**
+
+| Supplier Field | CTS Field | Transform |
+|----------------|-----------|-----------|
+| id | supplier_raw_ref | none |
+| title | title | none |
+| duration_minutes | duration_minutes | integer |
+| category | experience_category | map via hub_schema_mappings |
+| price.amount | price.original_amount | none |
+| price.currency | price.original_currency | none |
+| price.amount | price.amount_usd | convert via fx.js |
+| location.lat | origin.latitude | float |
+| location.lng | origin.longitude | float |
+| location.city | origin.city | none |
+| location.country | origin.country | none |
+| status | availability.status | AVAILABLE→CONFIRMED, LIMITED→LOW_AVAILABILITY, UNAVAILABLE→SOLD_OUT |
+| cancellation.free_until | policies.cancellation.free_until | ISO8601 |
+| cancellation.penalties | policies.cancellation.penalty_schedule | array map |
+
+---
+
+### 4.2 HotelBeds — Experiences (Tours & Activities)
+
+| Field | Value |
+|-------|-------|
+| Auth | HMAC-SHA256 per request |
+| Sandbox base URL | https://api.test.hotelbeds.com/activity-api/1.0 |
+| Production base URL | https://api.hotelbeds.com/activity-api/1.0 |
+| Env vars | HOTELBEDS_API_KEY, HOTELBEDS_SECRET_KEY |
+| CTS type | EXPERIENCE |
+| supplier_slug | hotelbeds-activities |
+
+**HMAC Signature (computed on every request):**
+```js
+import { createHash } from 'crypto';
+const ts = Math.floor(Date.now() / 1000).toString();
+const sig = createHash('sha256')
+  .update(API_KEY + SECRET_KEY + ts).digest('hex');
+// Required headers: X-Api-Key, X-Signature, X-Timestamp
+```
+
+**Operations:**
+
+| Operation | Method | Endpoint | Notes |
+|-----------|--------|----------|-------|
+| search | GET | /activities | Returns modalities array |
+| detail | GET | /activities/:activityCode | Full description + media |
+| availability | GET | /activities?date=... | Per-modality availability |
+| book | POST | /bookings | Returns bookingReference |
+| confirm | POST | /bookings/:ref/confirmation | Two-step: book then confirm |
+| get | GET | /bookings/:ref | Booking status |
+| cancel | DELETE | /bookings/:ref | Returns cancellation status |
+
+**CTS Field Mappings:**
+
+| Supplier Field | CTS Field | Notes |
+|----------------|-----------|-------|
+| activityCode | supplier_raw_ref | Required for book + confirm |
+| modality.name | title | Each modality = separate CTSTravelOption |
+| modality.duration.value | duration_minutes | Convert hours to minutes if needed |
+| category.code | experience_category | Map via hub_schema_mappings |
+| modality.amounts[0].amount | price.original_amount | EUR |
+| — | price.original_currency | Hardcode "EUR" |
+| modality.amounts[0].amount | price.amount_usd | Convert via fx.js |
+| location.longitude | origin.longitude | float |
+| location.latitude | origin.latitude | float |
+| location.description | origin.city | Extract city from description |
+| cancellationPolicies | policies.cancellation.penalty_schedule | Map hoursBeforeDateTime + penalty% |
+| modality.availabilityQuota | availability.seats | integer |
+
+**Important:** Each modality within an activity response is a separate
+CTSTravelOption. If an activity has 3 modalities, emit 3 CTSTravelOption
+objects, all sharing the same activityCode as supplier_raw_ref.
+
+---
+
+### 4.3 HotelBeds — Hotels
+
+| Field | Value |
+|-------|-------|
+| Auth | HMAC-SHA256 (same utility as Activities) |
+| Booking API sandbox | https://api.test.hotelbeds.com/hotel-api/1.2 |
+| Content API sandbox | https://api.test.hotelbeds.com/hotel-content-api/1.0 |
+| Booking API production | https://api.hotelbeds.com/hotel-api/1.2 |
+| Env vars | HOTELBEDS_API_KEY, HOTELBEDS_SECRET_KEY |
+| CTS type | HOTEL |
+| supplier_slug | hotelbeds-hotels |
+
+**Operations:**
+
+| Operation | Method | Endpoint | Notes |
+|-----------|--------|----------|-------|
+| search | POST | /hotel-api/1.2/hotels | Returns rooms per hotel |
+| content | GET | /hotel-content-api/1.0/hotels/:code | Static — cache 24hr in hotel_content |
+| checkrates | POST | /hotel-api/1.2/checkrates | MANDATORY before every book |
+| book | POST | /hotel-api/1.2/bookings | |
+| get | GET | /hotel-api/1.2/bookings/:ref | |
+| cancel | DELETE | /hotel-api/1.2/bookings/:ref | |
+
+**CTS Field Mappings:**
+
+| Supplier Field | CTS Field | Notes |
+|----------------|-----------|-------|
+| hotel.rooms[].rates[].rateKey | supplier_raw_ref | CRITICAL: expires ~15min |
+| hotel.name | title | from content cache |
+| hotel.rooms[].rates[].boardCode | meal_plan | RO/BB/HB/FB/AI |
+| hotel.rooms[].rates[].net | price.net_amount_usd | B2B net rate |
+| hotel.rooms[].rates[].net | price.amount_usd | Use net for B2B |
+| hotel.rooms[].rates[].currency | price.original_currency | |
+| hotel.latitude | origin.latitude | from content |
+| hotel.longitude | origin.longitude | from content |
+| hotel.countryCode | origin.country | |
+| hotel.city.content | origin.city | |
+| hotel.rooms[].rates[].cancellationPolicies | policies.cancellation.penalty_schedule | |
+| hotel.rooms[].rates[].rooms | availability.rooms | integer |
+
+**Rate Key Expiry Rule:**
+rateKey must be re-validated via checkrates if > 10 minutes have passed
+since the search. Always call checkrates immediately before book.
+
+**Caching Rules:**
+- hotel_content (static): cache in RDS hotel_content table, TTL 24hr.
+  Query hotel_content first; only call Content API on cache miss.
+- Rate keys: NEVER cache. Always from live search → checkrates → book.
+- Search results: no caching in Phase 1. Add TODO comment.
+
+**Net Pricing for B2B:**
+HotelBeds returns net (wholesale) rates for B2B API partners.
+Set price.net_amount_usd = hotel.rooms[].rates[].net
+Set price.markup_applied = false
+Set price.amount_usd = price.net_amount_usd (L5 applies markup)
+
+---
+
+### 4.4 HotelBeds — Transfers
+
+| Field | Value |
+|-------|-------|
+| Auth | HMAC-SHA256 (same utility) |
+| Sandbox base URL | https://api.test.hotelbeds.com/transfer-api/1.0 |
+| Production base URL | https://api.hotelbeds.com/transfer-api/1.0 |
+| Env vars | HOTELBEDS_API_KEY, HOTELBEDS_SECRET_KEY |
+| CTS type | TRANSFER |
+| supplier_slug | hotelbeds-transfers |
+
+**Operations:**
+
+| Operation | Method | Endpoint | Notes |
+|-----------|--------|----------|-------|
+| search | GET | /transfers/availability | |
+| detail | GET | /transfers/:id | Vehicle + route detail |
+| book | POST | /bookings | Requires passenger manifest |
+| get | GET | /bookings/:ref | |
+| cancel | DELETE | /bookings/:ref | |
+| return_search | GET | /transfers/availability | Separate call, link via trip_id |
+
+**CTS Field Mappings:**
+
+| Supplier Field | CTS Field | Notes |
+|----------------|-----------|-------|
+| transfer.id | supplier_raw_ref | |
+| transfer.category | type | SHUTTLE→SHARED_TRANSFER, PRIVATE→PRIVATE_TRANSFER, LUXURY→LUXURY_TRANSFER |
+| transfer.vehicle.code | vehicle_class | SEDAN, VAN, MINIBUS, BUS |
+| transfer.price.totalAmount | price.original_amount | |
+| transfer.price.currency | price.original_currency | |
+| transfer.price.totalAmount | price.amount_usd | convert via fx.js |
+| transfer.origin.code | origin.iata_code | if airport |
+| transfer.origin.type | origin.type | AIRPORT/HOTEL/COORDINATES |
+| transfer.destination.code | destination.iata_code | if airport |
+| transfer.vehicle.maxPax | availability.max_passengers | |
+| transfer.cancellationPolicies | policies.cancellation.penalty_schedule | |
+| — | transfer_meta.trip_id | UUID generated by TOS at search time |
+| flightNumber (booking param) | transfer_meta.inbound_flight | |
+| transfer.pickupInformation.type | transfer_meta.pickup_type | MEET_AND_GREET / CURBSIDE |
+
+**Return Transfer Rule:**
+Outbound and return transfers are separate API calls.
+At search time, generate a UUID trip_id.
+Set transfer_meta.trip_id = trip_id on both CTSTravelOption objects.
+Set transfer_meta.return_trip_id on outbound, pointing to return option_id.
+
+**Per-Passenger Equivalent:**
+HotelBeds charges per vehicle. Compute and store:
+per_passenger_equivalent = price.amount_usd / availability.max_passengers
+Store in a supplementary display field (not core CTS — add as metadata).
+
+---
+
+## 5. Dedup Configuration
+
+### 5.1 Default Config File
+Path: /config/dedup.default.json (committed to repo — NOT in cloud storage)
+
+```json
+{
+  "version": "1.0",
+  "description": "TOS default dedup configuration for experience inventory",
+  "strategy": "LOWEST_PRICE",
+  "preferred_supplier": null,
+  "thresholds": {
+    "location_radius_m": 150,
+    "name_similarity_min": 0.75,
+    "duration_variance_pct": 20,
+    "composite_score_duplicate": 0.80,
+    "composite_score_uncertain": 0.60
+  },
+  "weights": {
+    "location": 0.35,
+    "name": 0.40,
+    "duration": 0.15,
+    "category": 0.10
+  },
+  "uncertain_behavior": "SHOW_BOTH",
+  "test_mode": false,
+  "test_log_destination": "rds"
+}
+```
+
+### 5.2 Config Merge Logic
+At agent session start, OpenClaw calls src/dedup/config.js:
+1. Load /config/dedup.default.json (fs.readFileSync — sync OK at startup)
+2. Query hub_dedup_config WHERE tenant_id = $1 AND is_active = true
+3. If tenant row found: deep merge config_json on top of default
+   (tenant values win field-by-field, not entire object replacement)
+4. Return merged config object
+
+### 5.3 Composite Scoring Implementation
+```js
+// src/dedup/engine.js
+import Fuse from 'fuse.js';
+import { getDistance } from 'geolib';
+
+// Name normalization — strip before fuzzy matching
+const STOP_WORDS = ['tour','experience','visit','skip','the','a','an',
+  'line','access','priority','guided','private','group','day',
+  'half','full','ticket','trip','excursion'];
+
+export const normalizeName = (name) =>
+  name.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(w => !STOP_WORDS.includes(w))
+    .join(' ')
+    .trim();
+
+export const scoreDedup = (a, b, cfg) => {
+  // Location signal
+  const distM = (a.origin?.latitude && b.origin?.latitude)
+    ? getDistance(
+        { lat: a.origin.latitude, lon: a.origin.longitude },
+        { lat: b.origin.latitude, lon: b.origin.longitude }
+      )
+    : Infinity;
+  const locationFires = distM <= cfg.thresholds.location_radius_m;
+
+  // Name signal
+  const fuse = new Fuse(
+    [{ n: normalizeName(b.title || '') }],
+    { keys: ['n'], includeScore: true, threshold: 1.0 }
+  );
+  const nameResult = fuse.search(normalizeName(a.title || ''));
+  const rawSim = nameResult[0] ? 1 - nameResult[0].score : 0;
+  const nameContributes = rawSim >= cfg.thresholds.name_similarity_min;
+
+  // Duration signal
+  const aDur = a.duration_minutes || 0;
+  const bDur = b.duration_minutes || 0;
+  const durationFires = aDur > 0 && bDur > 0 &&
+    Math.abs(aDur - bDur) / Math.max(aDur, bDur)
+      <= cfg.thresholds.duration_variance_pct / 100;
+
+  // Category signal
+  const categoryMatch = !!(a.experience_category &&
+    a.experience_category === b.experience_category);
+
+  const score =
+    (locationFires    ? cfg.weights.location : 0) +
+    (nameContributes  ? rawSim * cfg.weights.name : 0) +
+    (durationFires    ? cfg.weights.duration : 0) +
+    (categoryMatch    ? cfg.weights.category : 0);
+
+  if (score >= cfg.thresholds.composite_score_duplicate) return 'DUPLICATE';
+  if (score >= cfg.thresholds.composite_score_uncertain) return 'UNCERTAIN';
+  return 'DISTINCT';
+};
+```
+
+### 5.4 Strategy Outcomes
+
+| Decision | Strategy | Action |
+|----------|----------|--------|
+| DUPLICATE | LOWEST_PRICE | Return lower price option. Log suppressed option to hub_transactions with status=DEDUP_SUPPRESSED |
+| DUPLICATE | PREFERRED_SUPPLIER | Return preferred supplier option regardless of price. Log other as DEDUP_SUPPRESSED |
+| DUPLICATE | SHOW_ALL | Return both. Set is_duplicate_of on higher-priced option pointing to lower-priced option_id |
+| UNCERTAIN | SHOW_BOTH | Return both with dedup_score and candidate_pair_id (shared UUID linking the pair) |
+| UNCERTAIN | ESCALATE | Write to hub_escalations. Return both to caller immediately with escalation_pending=true in meta |
+| UNCERTAIN | AGENT_DECIDE | Apply inventory.dedup.uncertain prompt. Agent makes final DUPLICATE/DISTINCT call |
+| DISTINCT | any | Return both independently. No linkage. |
+
+**Test Mode:**
+When cfg.test_mode = true, write every scoring decision to hub_dedup_test_log
+regardless of outcome. Include all four signal values, composite score,
+decision, and strategy_applied. Results returned to caller are unaffected.
+
+---
+
+## 6. Prompt Library
+
+### 6.1 hub_prompts Table
+See Section 9 for DDL. Key fields:
+- prompt_key: unique dotted identifier
+- category: INVENTORY | INTEGRATION | PRICING | POLICY
+- trigger_condition: string evaluated by library.js against context
+- prompt_template: parameterized text with {variable} slots
+- escalate_to_human: if true, write to hub_escalations + notify
+
+### 6.2 Trigger Condition Evaluation
+src/prompts/library.js evaluates trigger_condition as a simple expression
+against a context object. Use a safe eval approach — support these operators:
+- Property access: context.dedup_score >= 0.60
+- Comparisons: >, <, >=, <=, ===, !==
+- Boolean: AND, OR, NOT
+- Null checks: IS_NULL(context.duration_minutes)
+
+### 6.3 Full Prompt Seed Data
+Insert all 15 prompts in migrations/002_seed_prompts.sql:
+
+```sql
+INSERT INTO hub_prompts
+  (prompt_key, category, trigger_condition, prompt_template,
+   escalate_to_human, is_active) VALUES
+
+-- INVENTORY PROMPTS
+
+('inventory.dedup.uncertain',
+ 'INVENTORY',
+ 'context.dedup_score >= 0.60 AND context.dedup_score < 0.80 AND context.uncertain_behavior === "AGENT_DECIDE"',
+ 'Two experience results have a dedup score of {dedup_score} — uncertain range.
+Product A: "{title_a}" from {supplier_a}, operator: {operator_a}
+Product B: "{title_b}" from {supplier_b}, operator: {operator_b}
+If the operator names match exactly (case-insensitive), treat as DUPLICATE.
+Otherwise treat as DISTINCT. Return your decision as JSON:
+{"decision": "DUPLICATE" | "DISTINCT", "reasoning": "..."}',
+ false, true),
+
+('inventory.experience.no_duration',
+ 'INVENTORY',
+ 'IS_NULL(context.duration_minutes) AND context.type === "EXPERIENCE"',
+ 'The experience "{title}" from {supplier} has no duration field.
+Scan the description for duration mentions. Patterns to match:
+- "X hours" or "X-hour" → X * 60 minutes
+- "half day" → 240 minutes
+- "full day" or "whole day" → 480 minutes
+- "X minutes" → X minutes
+Description: "{description}"
+Return JSON: {"duration_minutes": <integer> | null, "source": "extracted" | "not_found"}',
+ false, true),
+
+('inventory.experience.zero_results',
+ 'INVENTORY',
+ 'context.result_count === 0 AND context.other_supplier_count > 0',
+ 'Supplier {supplier} returned 0 results for search in {destination}.
+The other supplier returned {other_supplier_count} results.
+Check if this is an expected coverage gap or an anomaly.
+Known low-coverage suppliers for this region: {low_coverage_suppliers}
+If this is an expected gap: return {"action": "LOG", "reason": "coverage_gap"}
+If unexpected: return {"action": "FLAG", "reason": "SUPPLIER_ANOMALY"}',
+ false, true),
+
+('inventory.policy.missing_cancellation',
+ 'INVENTORY',
+ 'IS_NULL(context.cancellation_policy) AND context.operation === "normalize"',
+ 'The result "{title}" from {supplier} has no cancellation policy.
+Tenant default policy: {tenant_default_policy}
+TOS platform default: NON_REFUNDABLE
+Apply in order: tenant default if set, else platform default.
+Return JSON: {"policy_source": "TENANT_DEFAULT" | "PLATFORM_DEFAULT",
+"policy": {"type": "NON_REFUNDABLE" | "FREE_CANCELLATION", "free_until": null}}',
+ false, true),
+
+('inventory.experience.category_mismatch',
+ 'INVENTORY',
+ 'context.category_a !== context.category_b AND context.decision === "DUPLICATE"',
+ 'Two confirmed duplicate experiences have different CTS categories.
+Product A category: {category_a} (from {supplier_a})
+Product B category: {category_b} (from {supplier_b})
+Rules:
+1. If one is more specific (e.g. FOOD vs CULTURE for a cooking class) → use more specific
+2. If genuinely ambiguous → use Bridgify category as authoritative
+3. Bridgify slug is "bridgify"
+Return JSON: {"category": "<chosen_category>", "reason": "..."}',
+ false, true),
+
+-- INTEGRATION PROMPTS
+
+('integration.supplier.high_latency',
+ 'INTEGRATION',
+ 'context.response_time_ms > 3000',
+ 'Supplier {supplier} response time is {response_time_ms}ms (threshold: 3000ms).
+Other supplier has returned results: {other_results_available}
+Rules:
+- If other supplier has results: return partial results now, log latency event
+- If this is the only supplier: wait up to 8000ms total, then timeout
+Current elapsed time: {elapsed_ms}ms
+Return JSON: {"action": "PARTIAL_RETURN" | "WAIT" | "TIMEOUT",
+"reason": "..."}',
+ false, true),
+
+('integration.supplier.partial_results',
+ 'INTEGRATION',
+ 'context.results_truncated === true OR context.result_count < context.expected_min',
+ 'Supplier {supplier} returned truncated or insufficient results.
+Result count: {result_count}, expected minimum: {expected_min}
+Truncation flag: {results_truncated}
+If result_count >= 3: return with meta.results_truncated = true
+If result_count < 3: retry with relaxed params:
+  - Expand location radius by 20%
+  - Expand date range by +/- 1 day
+Return JSON: {"action": "RETURN_PARTIAL" | "RETRY_RELAXED",
+"relaxed_params": {...} | null}',
+ false, true),
+
+('integration.supplier.auth_failure',
+ 'INTEGRATION',
+ 'context.http_status === 401 OR context.http_status === 403',
+ 'Supplier {supplier} returned auth failure (HTTP {http_status}).
+Immediately stop all calls to this supplier for this session.
+Log auth_failure event. Return results from remaining suppliers only.
+Return JSON: {"action": "STOP_SUPPLIER", "supplier": "{supplier}",
+"session_note": "auth_failure — {supplier} excluded from results"}',
+ true, true),
+
+('integration.supplier.unexpected_format',
+ 'INTEGRATION',
+ 'context.normalization_failed === true',
+ 'Normalization failed for {failure_count} results from {supplier}.
+Total results attempted: {total_count}
+Failure rate: {failure_rate_pct}%
+Failed fields: {failed_fields}
+If failure_rate_pct > 20: escalate as SYSTEMATIC_FORMAT_CHANGE
+If failure_rate_pct <= 20: exclude failed results, continue with passing ones
+Return JSON: {"action": "EXCLUDE_FAILED" | "ESCALATE_SYSTEMATIC",
+"excluded_count": {failure_count}}',
+ false, true),
+
+('integration.hotelbeds.rate_key_expiry_risk',
+ 'INTEGRATION',
+ 'context.supplier === "hotelbeds-hotels" AND context.minutes_since_search > 10',
+ 'HotelBeds rate key may have expired. Time since search: {minutes_since_search} minutes.
+Rate keys expire after approximately 15 minutes.
+Action: automatically trigger checkrates before proceeding to booking.
+If checkrates shows price change > 5%: surface price change to caller before confirming.
+If price unchanged or change <= 5%: proceed to booking silently.
+Return JSON: {"action": "CHECKRATES_REQUIRED", "price_change_threshold_pct": 5}',
+ false, true),
+
+-- PRICING PROMPTS
+
+('pricing.extreme_delta',
+ 'PRICING',
+ 'context.decision === "DUPLICATE" AND context.price_delta_pct > 40',
+ 'Confirmed duplicate products have a {price_delta_pct}% price difference.
+Product A: "{title_a}" — {price_a} USD from {supplier_a}
+Product B: "{title_b}" — {price_b} USD from {supplier_b}
+This exceeds the 40% anomaly threshold.
+Do NOT automatically suppress the higher price.
+Return both with pricing_anomaly = true and delta_pct = {price_delta_pct}.
+Return JSON: {"action": "FLAG_ANOMALY", "return_both": true,
+"pricing_anomaly": true, "delta_pct": {price_delta_pct}}',
+ false, true),
+
+('pricing.fx_rate_missing',
+ 'PRICING',
+ 'IS_NULL(context.fx_rate) AND context.currency !== "USD"',
+ 'Cannot normalize price for "{title}" from {supplier}.
+Currency {currency} has no FX rate in the local rate table.
+Do NOT use a stale or estimated rate — this could cause pricing errors.
+Halt normalization for this result only. Other results unaffected.
+Return JSON: {"action": "HALT_RESULT", "reason": "UNKNOWN_CURRENCY",
+"currency": "{currency}"}',
+ true, true),
+
+('pricing.net_retail_ambiguity',
+ 'PRICING',
+ 'context.supplier === "hotelbeds-hotels" AND context.net_flag_missing === true AND context.amount_usd > context.expected_max_usd',
+ 'HotelBeds hotel result for "{title}" has unexpectedly high amount: {amount_usd} USD.
+Net rate flag is missing. Tenant tier: {tenant_tier}
+If tenant tier is ENTERPRISE or GROWTH (B2B net pricing expected):
+  flag as PRICING_TYPE_UNCERTAIN, include in results with warning
+If tenant tier is STARTER:
+  treat as retail price, no warning needed
+Return JSON: {"action": "FLAG_UNCERTAIN" | "TREAT_AS_RETAIL",
+"pricing_type": "UNCERTAIN" | "RETAIL"}',
+ false, true),
+
+-- POLICY PROMPTS
+
+('policy.conflicting_cancellation',
+ 'POLICY',
+ 'context.decision === "DUPLICATE" AND context.policies_conflict === true',
+ 'Confirmed duplicate products have conflicting cancellation policies.
+Policy A from {supplier_a}: free until {free_until_a}, penalties: {penalties_a}
+Policy B from {supplier_b}: free until {free_until_b}, penalties: {penalties_b}
+Apply the MORE RESTRICTIVE policy (earlier deadline, higher penalties).
+Log both original policies in hub_transactions for audit.
+Return JSON: {"chosen_policy": <more_restrictive_policy_object>,
+"policy_source": "CONFLICT_RESOLVED_RESTRICTIVE",
+"discarded_policy": <less_restrictive_policy_object>}',
+ false, true),
+
+('policy.free_cancellation_deadline_past',
+ 'POLICY',
+ 'context.free_until_is_past === true',
+ 'The free cancellation deadline for "{title}" has already passed.
+free_until: {free_until} (now: {current_time})
+Update availability.status to CANCELLATION_FEE_APPLIES.
+Do not filter or hide the result — still return it.
+Ensure the displayed cancellation policy reflects current state.
+Return JSON: {"action": "UPDATE_STATUS",
+"availability_status": "CANCELLATION_FEE_APPLIES"}',
+ false, true);
+```
+
+---
+
+## 7. Integration Onboarding Flow
+
+### 7.1 Integration Manifest — Full Structure
+
+```json
+{
+  "manifest_version": "1.0",
+  "supplier": {
+    "name": "string — display name",
+    "slug": "string — URL-safe, lowercase, hyphens e.g. viator",
+    "categories": ["EXPERIENCE"],
+    "base_url_sandbox": "https://...",
+    "base_url_production": "https://...",
+    "documentation_url": "https://... (agent fetches this)",
+    "support_contact": "string"
+  },
+  "auth": {
+    "type": "API_KEY | HMAC_SHA256 | OAUTH2 | BASIC",
+    "credential_fields": ["api_key"],
+    "signature_algorithm": "SHA256",
+    "signature_inputs": ["key", "secret", "timestamp"],
+    "token_endpoint": null
+  },
+  "operations": {
+    "search": {
+      "method": "GET",
+      "endpoint": "/path",
+      "request_schema": {},
+      "response_schema": {}
+    },
+    "detail":       { "method": "GET",    "endpoint": "/path/:id", "request_schema": {}, "response_schema": {} },
+    "availability": { "method": "GET",    "endpoint": "/path",     "request_schema": {}, "response_schema": {} },
+    "book":         { "method": "POST",   "endpoint": "/path",     "request_schema": {}, "response_schema": {} },
+    "get":          { "method": "GET",    "endpoint": "/path/:ref","request_schema": {}, "response_schema": {} },
+    "cancel":       { "method": "DELETE", "endpoint": "/path/:ref","request_schema": {}, "response_schema": {} }
+  },
+  "rate_limit_rpm": 60,
+  "response_format": "JSON",
+  "supports_webhooks": false,
+  "webhook_events": [],
+  "cts_mapping": {
+    "type_value": "EXPERIENCE",
+    "field_mappings": [
+      { "source": "supplier.fieldName", "target": "CTS.fieldName", "transform": "fn_name | null" }
+    ],
+    "status_mappings": {
+      "AVAILABLE": "CONFIRMED",
+      "FULL": "SOLD_OUT"
+    },
+    "default_currency": "EUR",
+    "category_mappings": {
+      "SPORT": "SPORT",
+      "CULTURE": "CULTURE"
+    }
+  },
+  "execution_profile": {
+    "sync_operations": ["search", "detail", "availability", "book", "get", "cancel"],
+    "async_operations": [],
+    "avg_response_time_ms": 800
+  },
+  "test_suite": {
+    "sandbox_search_params": {},
+    "expected_result_count_min": 1,
+    "test_booking_ref": null
+  },
+  "tenant_config": {
+    "tenant_id": "ALWAYS overwritten server-side with authenticated caller tenant_id",
+    "sla_tier": "ENTERPRISE | GROWTH | STARTER",
+    "preferred_for_categories": []
+  }
+}
+```
+
+**Required fields for validation (Zod):**
+- supplier.name, supplier.slug, supplier.categories (min 1)
+- supplier.base_url_sandbox
+- auth.type, auth.credential_fields (min 1)
+- operations must include at minimum: search AND book
+- cts_mapping.field_mappings (min 1 entry)
+- test_suite.sandbox_search_params (non-empty object)
+
+### 7.2 API Onboarding Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| /v1/integrations/onboard | POST | Submit manifest (partial or complete). Returns { session_id } |
+| /v1/integrations/onboard/:id | GET | Poll session. Returns { status, manifest, validation_report } |
+| /v1/integrations/onboard/:id/manifest | PATCH | Correct manifest fields during session |
+| /v1/integrations/onboard/:id/confirm | POST | Trigger sandbox validation |
+| /v1/integrations/onboard/:id/promote | POST | Promote to production (only if validation passed) |
+| /v1/integrations | GET | List active integrations for tenant |
+| /v1/integrations/:slug | DELETE | Deactivate integration |
+
+### 7.3 Sandbox Validation Pipeline — 6 Steps
+
+Each step has a retry budget. Between retries: diagnose the error type,
+apply a targeted fix to the manifest or params, log the attempt.
+
+| Step | Test | Pass Criteria | Retries | On Budget Exhausted |
+|------|------|---------------|---------|---------------------|
+| 1 | Auth — lightweight request | HTTP 200, no 401/403 | 3 | Write VALIDATION_FAILURE_REPORT, halt |
+| 2 | Search — run sandbox_search_params | HTTP 200, results >= expected_min | 3 | Write report, halt |
+| 3 | CTS normalization | > 95% of results pass Zod | 3 (no new API call) | Write report, halt |
+| 4 | Detail fetch — first result | HTTP 200, enriched fields present | 2 | Mark OPTIONAL, continue |
+| 5 | Booking test — by test_booking_ref | HTTP 200, normalizes to CTS | 2 | Mark UNTESTED, continue |
+| 6 | Cancel sim — if test booking exists | HTTP 200 or 204 | 2 | Mark UNTESTED, continue |
+
+**Promotion gate:** Steps 1-3 must pass. Steps 4-6 may be UNTESTED.
+No manual override — if steps 1-3 fail after retries, promote is blocked.
+
+### 7.4 Provisioning Pipeline — 9 Steps (on /promote)
+
+Execute sequentially. Each step is idempotent (safe to re-run on failure).
+
+| Step | Action | Target |
+|------|--------|--------|
+| 1 | INSERT hub_suppliers row from manifest.supplier + auth | hub_suppliers |
+| 2 | INSERT hub_schema_mappings rows from manifest.cts_mapping | hub_schema_mappings |
+| 3 | Create empty Secrets Manager paths for prod credentials | infra/secrets.js |
+| 4 | INSERT hub_tool_contracts for each operation in manifest | hub_tool_contracts |
+| 5 | INSERT hub_dedup_config with SHOW_ALL strategy (safe default) | hub_dedup_config |
+| 6 | INSERT hub_integration_tests from manifest.test_suite | hub_integration_tests |
+| 7 | INSERT hub_tenant_suppliers linking tenant to supplier | hub_tenant_suppliers |
+| 8 | Send completion email via notify adapter | Resend |
+| 9 | Log NEW_INTEGRATION_PROVISIONED to stdout as structured JSON | stdout |
+
+### 7.5 Prompt Path — 8 Conversation Stages
+
+Managed by src/agents/onboarding.js. Persist manifest to
+hub_onboarding_sessions after every stage.
+
+| Stage | Agent Does | Human Provides |
+|-------|-----------|----------------|
+| 1. Identity | Asks for supplier name + categories. If doc URL provided: fetches + parses docs. Summarises endpoints, auth, format found. | Name, categories, doc URL |
+| 2. Auth | Proposes auth type + credential fields from docs. Shows Secrets Manager path that will be created. | Confirm or correct fields. Provide sandbox credentials (written to Secrets Manager immediately — never logged) |
+| 3. API Contract | Presents each operation endpoint + schema from docs. Asks: correct? Unsupported operations? | Confirm or correct each operation |
+| 4. CTS Mapping | Proposes full field mapping table from response schemas. | Review table, correct mismatches, add missed fields |
+| 5. Test Config | Asks for sandbox_search_params JSON. Confirms expected min result count. | Provide search params |
+| 6. Tenant Config | States SLA tier from tenant record. Asks for preferred categories. | Confirm tier, specify preferred categories if any |
+| 7. Review | Presents complete assembled manifest as structured summary. | Final confirmation |
+| 8. Validate & Promote | Runs sandbox validation. Reports results. Asks to promote on pass. | Confirm promotion |
+
+**Doc Fetch Implementation:**
+Use axios.get(documentation_url, { timeout: 15000 }).
+Extract from response body: endpoint paths, HTTP methods, request params,
+response field names and types, auth header names, rate limit headers.
+Propose field_mappings by matching response field names to CTS field names
+using string similarity — present as a table for human review.
+
+---
+
+## 8. Agent Design
+
+### 8.1 OpenClaw Dispatch Rules
+
+| Condition | Route |
+|-----------|-------|
+| supplier_count <= 2 AND complexity = LOW | SYNC → Executor |
+| supplier_count > 2 OR complexity = HIGH | ASYNC → Claude Managed Agent |
+| Internal scheduler fires | SCHEDULED → appropriate agent type |
+
+Note: no cloud scheduler (EventBridge etc.) — scheduling handled internally.
+
+### 8.2 Agent Types (Phase 1)
+
+| Agent | Trigger | Phase |
+|-------|---------|-------|
+| Supplier Orchestration | ASYNC search, multi-supplier + dedup | Phase 1 |
+| Integration Onboarding | POST /v1/integrations/onboard | Phase 1 |
+| Disruption Remediation | Supplier webhook, booking anomaly | Phase 3 |
+| Contract Compliance Monitor | Internal scheduler (hourly) | Phase 5 |
+| Invoice Reconciliation | Invoice webhook / scheduled pull | Phase 5 |
+
+### 8.3 OpenClaw Context Package
+
+Assembled by src/agents/context-packager.js and injected into every
+Claude Managed Agent session as system context:
+
+```json
+{
+  "tenant": {
+    "id": "string",
+    "tier": "ENTERPRISE | GROWTH | STARTER",
+    "rate_limits": { "rpm": 60 },
+    "approved_suppliers": ["bridgify", "hotelbeds-hotels"],
+    "schema_profile_id": "standard",
+    "sla_thresholds": { "response_ms": 800, "uptime_pct": 99.5 }
+  },
+  "task": {
+    "type": "SEARCH | BOOK | ONBOARD | COMPLIANCE | RECONCILE",
+    "priority": "HIGH | NORMAL | LOW",
+    "timeout_seconds": 30,
+    "escalation_path": "email | webhook | none"
+  },
+  "tool_contracts": [
+    { "tool_name": "tos.search.experiences", "executor": "sync_lambda", "sla_ms": 800 }
+  ],
+  "cts_schema_reference": { "version": "1.3", "types": ["EXPERIENCE", "HOTEL", "TRANSFER"] },
+  "supplier_health": {
+    "bridgify": "UP",
+    "hotelbeds-hotels": "UP",
+    "hotelbeds-activities": "UP",
+    "hotelbeds-transfers": "UP"
+  },
+  "domain_rules": {
+    "dedup_strategy": "LOWEST_PRICE",
+    "preferred_supplier": null,
+    "max_rebook_delta_usd": 50
+  },
+  "secrets_map": {
+    "hotelbeds-hotels": "/tos/prod/<tenant_id>/hotelbeds/hotels/credentials",
+    "bridgify": "/tos/prod/<tenant_id>/bridgify/experiences/credentials"
+  },
+  "active_prompts": [
+    { "prompt_key": "integration.hotelbeds.rate_key_expiry_risk", "trigger_condition": "..." }
+  ]
+}
+```
+
+---
+
+## 9. Database Schema
+
+All tables created by migrations/001_initial_schema.sql.
+All queries must include tenant_id. RLS enforced at application level.
+
+```sql
+-- Enable UUID generation
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE hub_tenants (
+  tenant_id        VARCHAR PRIMARY KEY,
+  name             VARCHAR NOT NULL,
+  tier             VARCHAR NOT NULL CHECK (tier IN ('ENTERPRISE','GROWTH','STARTER')),
+  rate_limit_rpm   INTEGER DEFAULT 60,
+  schema_profile   VARCHAR DEFAULT 'standard',
+  api_key_hash     VARCHAR NOT NULL,
+  default_cancellation_policy VARCHAR DEFAULT 'NON_REFUNDABLE',
+  dedup_strategy   VARCHAR DEFAULT 'LOWEST_PRICE',
+  preferred_supplier VARCHAR,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_credentials_map (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  supplier_slug    VARCHAR NOT NULL,
+  secret_path      VARCHAR NOT NULL,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_transactions (
+  txn_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  supplier_slug    VARCHAR NOT NULL,
+  operation        VARCHAR NOT NULL,
+  status           VARCHAR NOT NULL,
+  latency_ms       INTEGER,
+  source           VARCHAR DEFAULT 'LIVE',
+  request_hash     VARCHAR,
+  response_hash    VARCHAR,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_schema_mappings (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_slug    VARCHAR NOT NULL,
+  field_source     VARCHAR NOT NULL,
+  field_target     VARCHAR NOT NULL,
+  transform_fn     VARCHAR,
+  version          VARCHAR DEFAULT '1.0',
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_dedup_config (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  config_json      JSONB NOT NULL,
+  label            VARCHAR,
+  is_active        BOOLEAN DEFAULT true,
+  test_mode        BOOLEAN DEFAULT false,
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_dedup_test_log (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        VARCHAR NOT NULL,
+  session_id       UUID,
+  option_id_a      UUID NOT NULL,
+  option_id_b      UUID NOT NULL,
+  signal_location  FLOAT,
+  signal_name      FLOAT,
+  signal_duration  FLOAT,
+  signal_category  FLOAT,
+  composite_score  FLOAT NOT NULL,
+  decision         VARCHAR NOT NULL,
+  strategy_applied VARCHAR,
+  agent_reasoning  TEXT,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_prompts (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  prompt_key          VARCHAR UNIQUE NOT NULL,
+  category            VARCHAR NOT NULL CHECK (category IN ('INVENTORY','INTEGRATION','PRICING','POLICY')),
+  trigger_condition   VARCHAR NOT NULL,
+  prompt_template     TEXT NOT NULL,
+  escalate_to_human   BOOLEAN DEFAULT false,
+  response_schema     JSONB,
+  is_active           BOOLEAN DEFAULT true,
+  version             VARCHAR DEFAULT '1.0',
+  created_at          TIMESTAMPTZ DEFAULT now(),
+  updated_at          TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_escalations (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id       UUID,
+  tenant_id        VARCHAR NOT NULL,
+  prompt_key       VARCHAR NOT NULL,
+  trigger_data     JSONB NOT NULL,
+  status           VARCHAR DEFAULT 'PENDING' CHECK (status IN ('PENDING','RESOLVED','EXPIRED')),
+  resolution       JSONB,
+  resolved_by      VARCHAR,
+  resolved_at      TIMESTAMPTZ,
+  expires_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE agent_sessions (
+  session_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        VARCHAR NOT NULL,
+  task_type        VARCHAR NOT NULL,
+  status           VARCHAR DEFAULT 'IN_PROGRESS',
+  checkpoint       JSONB,
+  result           JSONB,
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_webhooks (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  event_type       VARCHAR NOT NULL,
+  endpoint_url     VARCHAR NOT NULL,
+  secret_hash      VARCHAR NOT NULL,
+  is_active        BOOLEAN DEFAULT true,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hotel_content (
+  hotel_code       VARCHAR PRIMARY KEY,
+  supplier_slug    VARCHAR NOT NULL,
+  name             VARCHAR,
+  description      TEXT,
+  star_rating      FLOAT,
+  latitude         FLOAT,
+  longitude        FLOAT,
+  country_code     VARCHAR,
+  city             VARCHAR,
+  timezone         VARCHAR,
+  image_urls       TEXT[],
+  cached_at        TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_suppliers (
+  supplier_slug      VARCHAR PRIMARY KEY,
+  name               VARCHAR NOT NULL,
+  categories         VARCHAR[] NOT NULL,
+  base_url_sandbox   VARCHAR,
+  base_url_prod      VARCHAR,
+  documentation_url  VARCHAR,
+  support_contact    VARCHAR,
+  auth_type          VARCHAR NOT NULL,
+  rate_limit_rpm     INTEGER DEFAULT 60,
+  response_format    VARCHAR DEFAULT 'JSON',
+  supports_webhooks  BOOLEAN DEFAULT false,
+  is_active          BOOLEAN DEFAULT true,
+  created_at         TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_tenant_suppliers (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id          VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  supplier_slug      VARCHAR NOT NULL REFERENCES hub_suppliers(supplier_slug),
+  sla_tier           VARCHAR NOT NULL,
+  preferred_for_cats VARCHAR[],
+  is_active          BOOLEAN DEFAULT true,
+  activated_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_onboarding_sessions (
+  session_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id          VARCHAR NOT NULL,
+  path               VARCHAR NOT NULL CHECK (path IN ('API','PROMPT')),
+  status             VARCHAR DEFAULT 'IN_PROGRESS'
+                     CHECK (status IN ('IN_PROGRESS','VALIDATED','PROMOTED','FAILED','EXPIRED')),
+  manifest_json      JSONB,
+  docs_fetched_url   VARCHAR,
+  docs_content_hash  VARCHAR,
+  validation_report  JSONB,
+  retry_count        INTEGER DEFAULT 0,
+  promoted_at        TIMESTAMPTZ,
+  expires_at         TIMESTAMPTZ DEFAULT now() + INTERVAL '72 hours',
+  created_at         TIMESTAMPTZ DEFAULT now(),
+  updated_at         TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_integration_tests (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_slug      VARCHAR NOT NULL REFERENCES hub_suppliers(supplier_slug),
+  tenant_id          VARCHAR NOT NULL,
+  search_params      JSONB NOT NULL,
+  expected_min_count INTEGER DEFAULT 1,
+  test_booking_ref   VARCHAR,
+  last_run_at        TIMESTAMPTZ,
+  last_run_status    VARCHAR,
+  created_at         TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE hub_tool_contracts (
+  contract_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tool_name        VARCHAR UNIQUE NOT NULL,
+  version          VARCHAR NOT NULL DEFAULT '1.0.0',
+  input_schema     JSONB NOT NULL,
+  output_schema    JSONB NOT NULL,
+  auth_scope       VARCHAR[] NOT NULL,
+  rate_limit_rpm   INTEGER,
+  executor         VARCHAR NOT NULL CHECK (executor IN ('sync_lambda','managed_agent','bridgify_direct')),
+  sla_ms           INTEGER,
+  is_active        BOOLEAN DEFAULT true,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+-- Static inventory (see Section 3B.6 for full DDL + indexes)
+CREATE TABLE hub_static_inventory (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_slug       VARCHAR NOT NULL REFERENCES hub_suppliers(supplier_slug),
+  supplier_raw_ref    VARCHAR NOT NULL,
+  type                VARCHAR NOT NULL,
+  title               VARCHAR NOT NULL,
+  description         TEXT,
+  latitude            FLOAT,
+  longitude           FLOAT,
+  city                VARCHAR,
+  country             VARCHAR,
+  timezone            VARCHAR,
+  category            VARCHAR,
+  duration_minutes    INTEGER,
+  vehicle_class       VARCHAR,
+  star_rating         FLOAT,
+  image_urls          TEXT[],
+  amenities           TEXT[],
+  meal_plans          TEXT[],
+  route_origin        VARCHAR,
+  route_destination   VARCHAR,
+  raw_content         JSONB,
+  is_active           BOOLEAN DEFAULT true,
+  last_synced_at      TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ DEFAULT now(),
+  updated_at          TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(supplier_slug, supplier_raw_ref)
+);
+
+CREATE INDEX idx_static_inventory_geo
+  ON hub_static_inventory (latitude, longitude) WHERE is_active = true;
+CREATE INDEX idx_static_inventory_supplier_type
+  ON hub_static_inventory (supplier_slug, type) WHERE is_active = true;
+CREATE INDEX idx_static_inventory_category
+  ON hub_static_inventory (category) WHERE is_active = true;
+
+CREATE TABLE hub_dedup_pairs (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id           VARCHAR NOT NULL REFERENCES hub_tenants(tenant_id),
+  inventory_id_a      UUID NOT NULL REFERENCES hub_static_inventory(id),
+  inventory_id_b      UUID NOT NULL REFERENCES hub_static_inventory(id),
+  composite_score     FLOAT NOT NULL,
+  decision            VARCHAR NOT NULL,
+  signal_location     FLOAT,
+  signal_name         FLOAT,
+  signal_duration     FLOAT,
+  signal_category     FLOAT,
+  computed_at         TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(tenant_id, inventory_id_a, inventory_id_b)
+);
+
+CREATE INDEX idx_dedup_pairs_tenant_a
+  ON hub_dedup_pairs (tenant_id, inventory_id_a);
+
+CREATE TABLE hub_sync_jobs (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_slug       VARCHAR NOT NULL,
+  status              VARCHAR DEFAULT 'RUNNING'
+                      CHECK (status IN ('RUNNING','COMPLETE','FAILED')),
+  records_fetched     INTEGER DEFAULT 0,
+  records_upserted    INTEGER DEFAULT 0,
+  records_deactivated INTEGER DEFAULT 0,
+  records_errored     INTEGER DEFAULT 0,
+  started_at          TIMESTAMPTZ DEFAULT now(),
+  completed_at        TIMESTAMPTZ,
+  error_message       TEXT
+);
+
+CREATE TABLE hub_sync_errors (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  sync_job_id         UUID NOT NULL REFERENCES hub_sync_jobs(id),
+  supplier_raw_ref    VARCHAR,
+  error_message       TEXT NOT NULL,
+  raw_record          JSONB,
+  created_at          TIMESTAMPTZ DEFAULT now()
+);
+```
+
+---
+
+## 10. API Surface — All 19 Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| /v1/search | POST | API Key | Travel search — sync or async based on complexity |
+| /v1/book | POST | API Key | Execute booking against a CTSTravelOption |
+| /v1/cancel | POST | API Key | Cancel booking |
+| /v1/booking/:id | GET | API Key | Get booking status and details |
+| /v1/integrations/onboard | POST | API Key | Start integration onboarding session |
+| /v1/integrations/onboard/:id | GET | API Key | Poll onboarding session status |
+| /v1/integrations/onboard/:id/manifest | PATCH | API Key | Update manifest during session |
+| /v1/integrations/onboard/:id/confirm | POST | API Key | Trigger sandbox validation |
+| /v1/integrations/onboard/:id/promote | POST | API Key | Promote to production (validation must pass) |
+| /v1/integrations | GET | API Key | List active integrations for tenant |
+| /v1/integrations/:slug | DELETE | API Key | Deactivate integration |
+| /v1/session/:id | GET | API Key | Poll agent session status |
+| /v1/webhook/:partner | POST | Webhook secret | Receive inbound supplier webhook |
+| /v1/tools | GET | API Key | List WebMCP tool contracts for tenant |
+| /v1/tools/:contract | POST | API Key | Execute a WebMCP tool contract |
+| /v1/agent/callback | POST | Internal | Agent session completion callback |
+| /v1/admin/dedup/test-log/:tenantId | GET | Admin | Review dedup test mode decision log |
+| /v1/admin/prompts | POST | Admin | Add new prompt to library |
+| /v1/admin/escalation/:id/resolve | POST | Admin | Resolve escalation (human reviewer) |
+
+**Auth Middleware Rules:**
+- API Key: X-Api-Key header → bcrypt compare → hub_tenants → attach to req.tenant → 401 if fail
+- Webhook secret: X-Webhook-Secret header → hash compare → hub_webhooks
+- Internal: X-Internal-Token from env var → validate on /v1/agent/callback only
+- Admin: X-Admin-Key from env var → validate on /v1/admin/* only
+
+---
+
+## 11. CTS Type Definitions (Zod + TypeScript)
+
+Use these as the Zod schema in src/normalization/cts-schema.js:
+
+```typescript
+type CTSTravelOption = {
+  option_id: string;            // UUID — generate with crypto.randomUUID()
+  type: 'FLIGHT' | 'HOTEL' | 'RAIL' | 'TRANSFER' | 'EXPERIENCE' | 'PACKAGE';
+  title: string;
+  origin: CTSLocation;
+  destination: CTSLocation;
+  // Time fields — use only the relevant ones for the type
+  depart_utc?: string;          // ISO8601 — FLIGHT/RAIL/TRANSFER
+  arrive_utc?: string;          // ISO8601 — FLIGHT/RAIL/TRANSFER
+  checkin_date?: string;        // YYYY-MM-DD — HOTEL
+  checkout_date?: string;       // YYYY-MM-DD — HOTEL
+  duration_minutes?: number;    // EXPERIENCE
+  experience_category?: string; // EXPERIENCE
+  vehicle_class?: string;       // TRANSFER: SEDAN|VAN|MINIBUS|BUS
+  transfer_meta?: CTSTransferMeta; // TRANSFER
+  meal_plan?: string;           // HOTEL: RO|BB|HB|FB|AI
+  price: CTSPrice;
+  availability: CTSAvailability;
+  policies: CTSPolicies;
+  supplier_raw_ref: string;     // opaque — REQUIRED for re-price and booking
+  supplier_slug: string;        // which supplier this came from
+  // Dedup fields — set by dedup engine
+  is_duplicate_of?: string;     // option_id of canonical when SHOW_ALL
+  dedup_score?: number;         // present when UNCERTAIN
+  candidate_pair_id?: string;   // shared UUID linking an uncertain pair
+  pricing_anomaly?: boolean;    // true when pricing.extreme_delta fires
+  media_quality?: string;       // LOW | STANDARD | HIGH
+};
+
+type CTSLocation = {
+  type: 'AIRPORT' | 'HOTEL' | 'COORDINATES' | 'CITY';
+  iata_code?: string;
+  city: string;
+  country: string;
+  timezone: string;             // IANA timezone e.g. Europe/Paris
+  latitude?: number;
+  longitude?: number;
+};
+
+type CTSPrice = {
+  amount_usd: number;           // always present — normalized to USD
+  original_amount: number;      // supplier native amount
+  original_currency: string;    // ISO 4217 e.g. EUR
+  fx_rate: number;              // rate used: original * fx_rate = amount_usd
+  net_amount_usd?: number;      // B2B net pricing (HotelBeds wholesale)
+  markup_applied?: boolean;     // false for B2B net rates
+};
+
+type CTSAvailability = {
+  status: 'CONFIRMED' | 'LOW_AVAILABILITY' | 'SOLD_OUT' |
+          'CANCELLATION_FEE_APPLIES' | 'PRICING_TYPE_UNCERTAIN' |
+          'DURATION_UNKNOWN';
+  seats?: number;               // EXPERIENCE/FLIGHT
+  rooms?: number;               // HOTEL
+  max_passengers?: number;      // TRANSFER
+  hold_expiry?: string;         // ISO8601 — when this price/availability expires
+};
+
+type CTSPolicies = {
+  cancellation: {
+    free_until?: string;        // ISO8601
+    penalty_schedule?: Array<{
+      hours_before: number;
+      charge_pct: number;
+    }>;
+    policy_source: 'SUPPLIER' | 'DEFAULT_APPLIED' | 'CONFLICT_RESOLVED_RESTRICTIVE';
+  };
+  change?: object;
+  baggage?: object;
+};
+
+type CTSTransferMeta = {
+  trip_id: string;              // UUID linking outbound + return
+  inbound_flight?: string;      // flight number for airport pickup
+  pickup_type?: 'MEET_AND_GREET' | 'CURBSIDE';
+  passenger_manifest_required?: boolean;
+  return_trip_id?: string;      // option_id of return leg
+};
+```
+
+---
+
+## 12. Success Criteria
+
+| Metric | Target |
+|--------|--------|
+| API response time (sync) | < 800ms p95 |
+| CTS normalization | 100% Zod pass on all 4 fixture files |
+| Dedup scoring | Correct decision on all test pair fixtures |
+| All endpoint tests | Pass — all 19 endpoints |
+| No hardcoded credentials | Zero instances in codebase |
+| Tenant isolation | Every DB query includes tenant_id |
+| Phase 1 integrations | All 4 live with passing tests |
+| Static inventory sync | All 4 suppliers sync successfully, records in hub_static_inventory |
+| Two-stage search | Stage 1 returns candidates < 30ms, full search < 800ms p95 |
+| Offline dedup | hub_dedup_pairs populated after sync, decisions applied at search time |
+| Prompt seeds | All 15 prompts in DB, trigger conditions working |
+| Onboarding flow | End-to-end with mocked supplier and doc fetch |
+
+---
+
+## 13. Open Items — Add TODOs in Code Where These Apply
+
+| Item | Default Behaviour | TODO Location |
+|------|------------------|---------------|
+| BRIDGIFY_BASE_URL | Log warning, use placeholder — do not throw on startup | src/suppliers/bridgify/experiences.js |
+| HotelBeds rate limit quota | Default 60 rpm — read from hub_suppliers.rate_limit_rpm | src/suppliers/base.js |
+| Currency FX rate provider | Hardcoded rate table in src/normalization/fx.js | src/normalization/fx.js |
+| Hotel search result caching | Skip in Phase 1 — add TODO comment where cache would go | src/suppliers/hotelbeds/hotels.js |
+| AWS SDK in secrets adapter | Dynamic import only in production path | src/infra/secrets.js |
+| Internal scheduler | Stub implementation only — no cloud scheduler | src/router/dispatch.js |
+
+
+## Decision Rules — Do Not Ask, Just Decide
+
+When you encounter these situations, apply the rule and 
+proceed without asking:
+
+| Situation | Decision |
+|-----------|----------|
+| Existing working code + new PRD | Evolve, never delete. Keep passing tests. |
+| Folder name ambiguity (- vs _) | Use whatever exists on disk |
+| Schema already has some tables | Add new migration file, never modify existing |
+| Test passes but PRD says different | Keep test passing, adapt PRD interpretation |
+| Partial implementation exists | Build on top of it, fill the gaps |
+| Two valid approaches exist | Pick the simpler one and proceed |
+| File already exists | Overwrite only if it conflicts with PRD |
+
+Only stop and ask if you hit a genuine blocker:
+- Missing credentials you cannot stub
+- A PRD contradiction you cannot resolve
+- A failing test you cannot fix after 3 attempts

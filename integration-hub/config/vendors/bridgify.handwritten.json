@@ -1,0 +1,52 @@
+{
+  "slug": "bridgify",
+  "category": "EXPERIENCE",
+  "auth_type": "OAUTH2_CLIENT_CREDENTIALS",
+  "token_endpoint": "/accounts/token/",
+  "token_form_encoded": true,
+  "token_grant_type": "client_credentials",
+  "token_scope": "read write",
+  "token_ttl_s": 3600,
+  "token_refresh_buffer_s": 60,
+  "environments": {
+    "sandbox": "https://api.dev.bridgify.io",
+    "production": "https://api.bridgify.io"
+  },
+  "response_envelope": "attractions[]",
+  "id_field": "external_id",
+  "trailing_slash_required": true,
+  "detail_endpoint_pattern": "/attractions/products/{external_id}/",
+  "currency": { "always": "USD", "conversion_required": false },
+  "pricing": {
+    "net_field": "merchant_price",
+    "retail_field": "retail_price",
+    "use_for_cts_price_amount": "retail_price"
+  },
+  "multi_supplier_aggregator": true,
+  "underlying_suppliers": ["viator", "getyourguide", "tiqets", "hotelbeds"],
+  "preserve_supplier_in_extension": "x-bridgify.supplier",
+  "booking_flow": {
+    "stateful_cart": true,
+    "step_count_range": [8, 10],
+    "order_matters": true,
+    "earlier_step_recall_resets_later": true,
+    "first_call": "required-fields",
+    "step_sequence_varies_per_product": true
+  },
+  "availability_models": {
+    "BSN": { "needs_date": false, "needs_time": false, "cts_status": "AVAILABLE" },
+    "CLD": { "needs_date": true,  "needs_time": false, "cts_status": "AVAILABLE_BY_DATE" },
+    "TSL": { "needs_date": true,  "needs_time": true,  "cts_status": "AVAILABLE_BY_TIMESLOT" },
+    "EVT": { "needs_date": true,  "needs_time": true,  "cts_status": "FIXED_EVENT" }
+  },
+  "pickup_models": ["list", "rect", "multirect"],
+  "supplier_special_cases": [
+    { "supplier": "getyourguide", "rule": "pickup handled via customer-info step, not pickups endpoint" }
+  ],
+  "required_search_params_de_facto": ["text_search", "city_name"],
+  "common_errors": [
+    { "symptom": "200 with empty attractions array", "cause": "missing text_search or city_name" },
+    { "symptom": "404 on token or detail", "cause": "missing trailing slash" },
+    { "symptom": "cart step out of order", "cause": "called earlier step which reset later state" }
+  ]
+}

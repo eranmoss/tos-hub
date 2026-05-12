@@ -1,0 +1,24 @@
+{
+  "name": "tos-infra",
+  "version": "1.0.0",
+  "description": "TOS AWS infrastructure — CDK stack",
+  "scripts": {
+    "build": "tsc",
+    "synth": "npx cdk synth",
+    "deploy": "npx cdk deploy",
+    "diff": "npx cdk diff",
+    "destroy": "npx cdk destroy"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.0.0",
+    "constructs": "^10.0.0",
+    "pg": "^8.20.0",
+    "source-map-support": "^0.5.21"
+  }
+}

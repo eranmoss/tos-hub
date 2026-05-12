@@ -1,0 +1,20 @@
+{
+  "auth_type": "OAUTH2_CLIENT_CREDENTIALS",
+  "response_envelope": "attractions[]",
+  "id_field": "external_id",
+  "trailing_slash_required": true,
+  "pagination": {
+    "style": "limit_offset",
+    "default_limit": 50
+  },
+  "required_search_params": [
+    "destination"
+  ],
+  "common_errors": [
+    {
+      "symptom": "empty results",
+      "cause": "missing destination parameter"
+    }
+  ],
+  "notes": "OAuth2 client credentials with attractions envelope and trailing slash endpoints"
+}

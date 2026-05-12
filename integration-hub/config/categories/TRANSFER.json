@@ -1,0 +1,13 @@
+{
+  "category": "TRANSFER",
+  "common_auth_types": ["HMAC_SHA256", "API_KEY"],
+  "common_response_envelopes": ["services[]", "transfers[]", "quotes[]", "options[]"],
+  "common_id_fields": ["rateKey", "service_id", "quote_id"],
+  "required_search_params": ["pickup_point", "dropoff_point", "pickup_datetime", "passengers"],
+  "optional_but_often_needed": ["inbound_flight", "luggage_count"],
+  "vehicle_class_canonical": ["SHARED", "PRIVATE_STANDARD", "PRIVATE_PREMIUM", "LUXURY", "VAN", "COACH"],
+  "common_errors": [
+    { "symptom": "missing inbound flight error", "cause": "airport pickups require flight number for meet-and-greet" },
+    { "symptom": "quote expired", "cause": "rateKey TTL exceeded — re-search before book" }
+  ]
+}

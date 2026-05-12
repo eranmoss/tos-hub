@@ -1,0 +1,18 @@
+{
+  "auth_type": "API_KEY",
+  "response_envelope": "events[]",
+  "id_field": "id",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "unknown",
+    "default_limit": null
+  },
+  "required_search_params": [],
+  "common_errors": [
+    {
+      "symptom": "detail 401",
+      "cause": "insufficient permissions for detail endpoint"
+    }
+  ],
+  "notes": "Discovery API with events envelope and embedded venue/attraction data"
+}

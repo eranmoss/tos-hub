@@ -1,0 +1,43 @@
+{
+  "experiences": [
+    {
+      "id": "BRDG-001",
+      "title": "Sagrada Familia Skip-the-Line Tour",
+      "duration_minutes": 120,
+      "category": "CULTURE",
+      "price": { "amount": 45.00, "currency": "EUR" },
+      "location": {
+        "lat": 41.4036,
+        "lng": 2.1744,
+        "city": "Barcelona",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "status": "AVAILABLE",
+      "seats_available": 12,
+      "cancellation": {
+        "free_until": "2026-05-01T10:00:00Z",
+        "penalties": [
+          { "hours_before": 24, "charge_pct": 50 },
+          { "hours_before": 0, "charge_pct": 100 }
+        ]
+      }
+    },
+    {
+      "id": "BRDG-002",
+      "title": "Park Güell Guided Visit",
+      "duration_minutes": 90,
+      "category": "CULTURE",
+      "price": { "amount": 30.00, "currency": "EUR" },
+      "location": {
+        "lat": 41.4145,
+        "lng": 2.1527,
+        "city": "Barcelona",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "status": "LIMITED",
+      "seats_available": 3
+    }
+  ]
+}

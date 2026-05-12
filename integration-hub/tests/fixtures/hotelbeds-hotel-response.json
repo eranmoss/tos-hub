@@ -1,0 +1,37 @@
+{
+  "hotels": {
+    "hotels": [
+      {
+        "code": 12345,
+        "name": "Hotel Barcelona Centro",
+        "countryCode": "ES",
+        "city": { "content": "Barcelona" },
+        "latitude": 41.3874,
+        "longitude": 2.1686,
+        "checkIn": "2026-06-01",
+        "checkOut": "2026-06-03",
+        "currency": "EUR",
+        "rooms": [
+          {
+            "code": "DBL.ST",
+            "name": "Double Standard",
+            "rates": [
+              {
+                "rateKey": "20260601|20260603|W|256|12345|DBL.ST|BB|XYZ",
+                "boardCode": "BB",
+                "net": 180.00,
+                "sellingRate": 220.00,
+                "currency": "EUR",
+                "allotment": 5,
+                "cancellationPolicies": [
+                  { "amount": 0, "from": "2026-05-25T00:00:00+02:00" },
+                  { "amount": 100, "from": "2026-05-30T00:00:00+02:00" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

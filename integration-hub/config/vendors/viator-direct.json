@@ -1,0 +1,20 @@
+{
+  "auth_type": "API_KEY",
+  "response_envelope": "products[]",
+  "id_field": "productCode",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "count_start",
+    "default_limit": null
+  },
+  "required_search_params": [
+    "filtering.destination"
+  ],
+  "common_errors": [
+    {
+      "symptom": "empty results",
+      "cause": "missing destination in filtering object"
+    }
+  ],
+  "notes": "POST-based search with versioned Accept headers and count/start pagination"
+}

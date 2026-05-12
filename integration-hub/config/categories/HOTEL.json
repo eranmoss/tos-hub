@@ -1,0 +1,13 @@
+{
+  "category": "HOTEL",
+  "common_auth_types": ["HMAC_SHA256", "API_KEY", "OAUTH2_CLIENT_CREDENTIALS"],
+  "common_response_envelopes": ["hotels.hotels[]", "results[]", "properties[]", "hotels[]"],
+  "common_id_fields": ["code", "hotel_id", "property_id", "supplier_id"],
+  "bookable_token_fields": ["rate_key", "bookable_token", "offer_id"],
+  "required_search_params": ["check_in", "check_out", "destination", "occupancy"],
+  "pricing_quirks": ["per_night_vs_per_stay", "net_vs_gross", "rate_key_ttl"],
+  "common_errors": [
+    { "symptom": "200 with empty hotels array", "cause": "unrecognised destination code in sandbox" },
+    { "symptom": "rate_key expired", "cause": "booking attempted outside search session TTL" }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "auth_type": "HMAC_SHA256",
+  "response_envelope": "activities[]",
+  "id_field": "activity_code",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "limit_offset",
+    "default_limit": 20
+  },
+  "required_search_params": [
+    "destination"
+  ],
+  "common_errors": [
+    {
+      "symptom": "empty results",
+      "cause": "missing destination parameter"
+    }
+  ],
+  "notes": "HMAC auth with timestamp signatures and activities envelope"
+}

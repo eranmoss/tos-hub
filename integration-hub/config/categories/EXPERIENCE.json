@@ -1,0 +1,28 @@
+{
+  "common_auth_types": [
+    "API_KEY",
+    "OAUTH2_CLIENT_CREDENTIALS",
+    "HMAC_SHA256"
+  ],
+  "common_response_envelopes": [
+    "activities[]",
+    "products[]",
+    "attractions[]",
+    "events[]"
+  ],
+  "common_id_fields": [
+    "id",
+    "activity_code",
+    "external_id",
+    "productCode"
+  ],
+  "required_search_params": [
+    "destination"
+  ],
+  "common_errors": [
+    {
+      "cause": "missing destination parameter",
+      "symptom": "empty results"
+    }
+  ]
+}

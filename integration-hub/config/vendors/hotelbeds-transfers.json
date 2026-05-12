@@ -1,0 +1,16 @@
+{
+  "auth_type": "HMAC_SHA256",
+  "response_envelope": "unknown (no sample data)",
+  "id_field": "unknown",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "unknown",
+    "default_limit": null
+  },
+  "required_search_params": [
+    "fields",
+    "language"
+  ],
+  "common_errors": [],
+  "notes": "Destinations endpoint only, no transfer search/booking data available"
+}

@@ -1,0 +1,51 @@
+{
+  "transfers": [
+    {
+      "id": "TRF-001",
+      "category": "PRIVATE",
+      "vehicle": { "code": "SEDAN", "maxPax": 3 },
+      "price": { "totalAmount": 65.00, "currency": "EUR" },
+      "origin": {
+        "type": "ATLAS",
+        "code": "BCN",
+        "city": "Barcelona",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "destination": {
+        "type": "HOTEL",
+        "city": "Barcelona",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "pickupDateTime": "2026-06-01T10:30:00Z",
+      "pickupInformation": { "type": "MEET_AND_GREET" },
+      "flightNumber": "VY1234",
+      "cancellationPolicies": [
+        { "hoursBeforeDeparture": 48, "percent": 0 },
+        { "hoursBeforeDeparture": 24, "percent": 50 }
+      ]
+    },
+    {
+      "id": "TRF-002",
+      "category": "SHUTTLE",
+      "vehicle": { "code": "BUS", "maxPax": 45 },
+      "price": { "totalAmount": 15.00, "currency": "EUR" },
+      "origin": {
+        "type": "ATLAS",
+        "code": "BCN",
+        "city": "Barcelona",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "destination": {
+        "type": "HOTEL",
+        "city": "Barcelona",
+        "country": "ES",
+        "timezone": "Europe/Madrid"
+      },
+      "pickupDateTime": "2026-06-01T10:30:00Z",
+      "pickupInformation": { "type": "CURBSIDE" }
+    }
+  ]
+}

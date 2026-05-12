@@ -1,0 +1,23 @@
+{
+  "auth_type": "HMAC_SHA256",
+  "response_envelope": "hotels.hotels[]",
+  "id_field": "code",
+  "trailing_slash_required": false,
+  "pagination": {
+    "style": "unknown",
+    "default_limit": null
+  },
+  "required_search_params": [
+    "stay.checkIn",
+    "stay.checkOut",
+    "occupancies",
+    "destinations"
+  ],
+  "common_errors": [
+    {
+      "symptom": "empty results",
+      "cause": "unrecognised destination code in sandbox"
+    }
+  ],
+  "notes": "Double-nested hotel response structure with extensive facility mappings"
+}

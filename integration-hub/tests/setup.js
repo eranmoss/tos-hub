@@ -1,0 +1,12 @@
+process.env.NODE_ENV = 'test';
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/tos_integration_hub_test';
+process.env.HOTELBEDS_API_KEY = process.env.HOTELBEDS_API_KEY || 'test_api_key';
+process.env.HOTELBEDS_SECRET_KEY = process.env.HOTELBEDS_SECRET_KEY || 'test_secret_key';
+process.env.HOTELBEDS_ENV = 'sandbox';
+process.env.BRIDGIFY_API_KEY = process.env.BRIDGIFY_API_KEY || 'test_bridgify_key';
+process.env.BRIDGIFY_BASE_URL = process.env.BRIDGIFY_BASE_URL || 'https://sandbox.bridgify.test';
+process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || 'test_resend_key';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret';
+process.env.INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || 'test_internal';
+process.env.ADMIN_KEY = process.env.ADMIN_KEY || 'test_admin';
+process.env.MASTER_KEY = process.env.MASTER_KEY || 'test_master_key';

@@ -1,0 +1,14 @@
+{
+  "version": "2.0",
+  "description": "TOS dedup configuration — embedding-based with city gate",
+  "strategy": "LOWEST_PRICE",
+  "preferred_supplier": null,
+  "thresholds": {
+    "embedding_duplicate": 0.85,
+    "embedding_uncertain": 0.70,
+    "max_cluster_size": 100
+  },
+  "uncertain_behavior": "SHOW_BOTH",
+  "test_mode": false,
+  "test_log_destination": "rds"
+}
