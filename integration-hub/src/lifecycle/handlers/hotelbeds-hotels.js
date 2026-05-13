@@ -60,11 +60,16 @@ export const hotelbedsHotelsHandler = {
     const client = await clientFor(tenantId);
     const hotelCode = rawContent?.code || rawRef;
     const today = new Date();
-    const stay = payload.stay || {
+    const stay = payload.stay || (payload.date_from ? {
+      checkIn: payload.date_from,
+      checkOut: payload.date_to || toYmd(addDays(new Date(payload.date_from), 1)),
+    } : {
       checkIn: toYmd(addDays(today, 7)),
       checkOut: toYmd(addDays(today, 9)),
-    };
-    const occupancies = payload.occupancies || [{ rooms: 1, adults: 2, children: 0 }];
+    });
+    const adults = payload.adults || 2;
+    const children = payload.children || 0;
+    const occupancies = payload.occupancies || [{ rooms: 1, adults, children }];
 
     const searchBody = {
       stay,
@@ -112,7 +117,7 @@ export const hotelbedsHotelsHandler = {
         ok: true,
         data: {
           hotels_count: 0,
-          rooms: 0,
+          rooms: [],
           first_rate_key: null,
           note: `No availability for hotel ${hotelCode} on ${stay.checkIn}–${stay.checkOut}. ` +
                 'HotelBeds sandbox has limited rates — try a different hotel or dates. ' +
@@ -127,11 +132,23 @@ export const hotelbedsHotelsHandler = {
       };
     }
 
+    const normalizedRooms = (firstHotel?.rooms || []).map((room) => ({
+      code: room.code,
+      name: room.name || room.code,
+      rates: (room.rates || []).map((rate) => ({
+        rateKey: rate.rateKey,
+        net: parseFloat(rate.net) || 0,
+        currency: rate.currency || 'EUR',
+        boardName: rate.boardName || '',
+        cancellationPolicies: rate.cancellationPolicies || [],
+      })),
+    }));
+
     return {
       ok: true,
       data: {
         hotels_count: hotels.length,
-        rooms: firstHotel?.rooms?.length || 0,
+        rooms: normalizedRooms,
         first_rate_key: rateKey,
         raw: data,
       },

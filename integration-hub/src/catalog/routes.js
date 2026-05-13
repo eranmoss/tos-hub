@@ -113,7 +113,7 @@ export const buildCatalogRouter = () => {
       const total = countRes.rows[0].total;
 
       const rows = await query(
-        `SELECT ${SELECT_FIELDS},
+        `SELECT ${SELECT_FIELDS}, si.raw_content,
                 cm.canonical_cat_id AS category_id,
                 cm.supplier_cat_name AS category_name
          FROM hub_static_inventory si
@@ -206,7 +206,7 @@ export const buildCatalogRouter = () => {
       const total = countRes.rows[0].total;
 
       const rows = await query(
-        `SELECT ${SELECT_FIELDS},
+        `SELECT ${SELECT_FIELDS}, si.raw_content,
                 cm.canonical_cat_id AS category_id,
                 cm.supplier_cat_name AS category_name,
                 1 - (si.embedding <=> $1) AS score
