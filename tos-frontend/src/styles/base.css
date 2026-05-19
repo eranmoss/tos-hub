@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #F9FAFB;
+    color: #111827;
+    margin: 0;
+  }
+
+  #tos-root {
+    min-height: 100vh;
+  }
+}
+
+/* ── Carousel ─────────────────────────────────────────────────────────────── */
+.tos-carousel-track {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding-bottom: 4px;
+}
+.tos-carousel-track::-webkit-scrollbar { display: none; }
+.tos-carousel-track > * {
+  scroll-snap-align: start;
+  flex-shrink: 0;
+}
+
+@layer components {
+  .tos-card {
+    @apply bg-card-bg rounded-card border border-border-default shadow-sm;
+  }
+
+  .tos-btn-primary {
+    @apply bg-accent text-white px-4 py-2 rounded-btn font-medium
+           hover:bg-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .tos-btn-secondary {
+    @apply bg-white text-text-primary px-4 py-2 rounded-btn font-medium
+           border border-border-default hover:bg-page-bg transition-colors;
+  }
+
+  .tos-badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .tos-badge-success {
+    @apply tos-badge bg-green-100 text-success;
+  }
+
+  .tos-badge-warning {
+    @apply tos-badge bg-amber-100 text-warning;
+  }
+
+  .tos-badge-danger {
+    @apply tos-badge bg-red-100 text-danger;
+  }
+
+  .tos-skeleton {
+    @apply bg-gray-200 animate-pulse rounded;
+  }
+}

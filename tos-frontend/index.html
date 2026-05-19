@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TOS Frontend — Dev Harness</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <!--
+    Dev harness: simulates what a host runtime (Flask, Express, etc.)
+    would inject before loading the bundle.
+
+    In production, the host sets window.TOS_CONFIG and includes the
+    built dist/tos-frontend.js. Nothing else is required.
+  -->
+  <script type="module">
+    window.TOS_CONFIG = {
+      apiBase:  import.meta.env.VITE_API_BASE_URL  || 'http://localhost:3000',
+      pageSlug: import.meta.env.VITE_DEV_PAGE_SLUG || null,
+      tenantId: import.meta.env.VITE_DEV_TENANT_ID || 'dev-tenant',
+      branding: { primaryColor: '#0D3B6E', logoUrl: null, fontFamily: 'Inter' },
+      auth: { token: localStorage.getItem('tos_jwt') || null },
+    };
+  </script>
+
+  <div id="tos-root"></div>
+
+  <script type="module" src="/src/index.js"></script>
+</body>
+</html>

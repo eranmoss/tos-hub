@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Travel | My Site</title>
+
+  <!-- Your existing site's styles -->
+  <link rel="stylesheet" href="/static/site.css" />
+
+  <!--
+    Inject TOS_CONFIG before the bundle.
+    pageSlug tells the bundle to load a specific page manifest
+    instead of booting the client-side router.
+  -->
+  <script>
+    window.TOS_CONFIG = {{ tos | tojson }};
+  </script>
+</head>
+<body>
+
+  <!-- Your site's own header / nav can live outside #tos-root -->
+  <header class="site-header">
+    <a href="/">My Travel Brand</a>
+  </header>
+
+  <!--
+    TOS Frontend renders inside this element only.
+    It does not touch anything outside #tos-root.
+    pageSlug mode: renders the named manifest, then stops.
+    No client-side routing — your site keeps control.
+  -->
+  <div id="tos-root"></div>
+
+  <!-- Your site's own footer -->
+  <footer class="site-footer">
+    <p>Powered by TOS</p>
+  </footer>
+
+  <script src="/static/tos-frontend.js"></script>
+
+  <!--
+    Optional: listen for TOS navigation events if you want to
+    intercept clicks (e.g. open product detail in a modal).
+  -->
+  <script>
+    window.addEventListener('tos:navigate', (e) => {
+      console.log('[Host] TOS navigating to:', e.detail.path);
+      // Default: let the bundle handle it.
+      // Override: e.preventDefault() + handle yourself.
+    });
+  </script>
+</body>
+</html>

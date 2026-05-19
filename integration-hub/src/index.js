@@ -15,6 +15,10 @@ import { evaluateTriggers } from './prompts/library.js';
 import { setSecret, deleteSecret } from './infra/secrets.js';
 import { buildDashboardRouter } from './dashboard/routes.js';
 import { buildCatalogRouter } from './catalog/routes.js';
+import { buildPagesRouter } from './pages/routes.js';
+import { buildBuilderRouter } from './builder/routes.js';
+import { buildComponentRouter } from './builder/component-routes.js';
+import { buildConsumerRouter } from './consumer/routes.js';
 
 export const buildApp = () => {
   const app = express();
@@ -33,6 +37,18 @@ export const buildApp = () => {
 
   // Public catalog API (deduplicated inventory)
   app.use(buildCatalogRouter());
+
+  // Page manifests + component registry (Phase 4: Travel Shell Runtime)
+  app.use(buildPagesRouter());
+
+  // Builder Agent endpoints (Phase 5)
+  app.use(buildBuilderRouter());
+
+  // Component Editor — create / manage Web Components (Phase 5+)
+  app.use(buildComponentRouter());
+
+  // Consumer-facing endpoints — TOS Frontend bundle (Phase 6)
+  app.use(buildConsumerRouter());
 
   // Dashboard API (magic-link auth + JWT-protected endpoints)
   app.use(buildDashboardRouter());

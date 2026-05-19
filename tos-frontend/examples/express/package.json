@@ -1,0 +1,15 @@
+{
+  "name": "tos-frontend-express-example",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Express host reference implementation for TOS Frontend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0"
+  }
+}

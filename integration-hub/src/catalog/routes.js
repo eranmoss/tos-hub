@@ -364,6 +364,45 @@ export const buildCatalogRouter = () => {
     }
   });
 
+  // Points of interest — canonical attraction registry
+  r.get('/v1/catalog/pois', async (req, res) => {
+    try {
+      const { city, destination, category, limit = 24, offset = 0 } = req.query;
+      const cityFilter = city || destination;
+      const conditions = [];
+      const params = [];
+
+      if (cityFilter) {
+        conditions.push(`city ILIKE $${params.length + 1}`);
+        params.push(`%${cityFilter}%`);
+      }
+      if (category) {
+        conditions.push(`category_id = $${params.length + 1}`);
+        params.push(category);
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const { rows } = await query(
+        `SELECT id, name, display_name, city, country, latitude, longitude,
+                category_id, description, image_url, experience_count
+         FROM hub_global_pois
+         ${where}
+         ORDER BY experience_count DESC, confidence DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, Number(limit), Number(offset)],
+      );
+
+      const [{ count }] = (await query(
+        `SELECT COUNT(*)::int AS count FROM hub_global_pois ${where}`,
+        params,
+      )).rows;
+
+      res.json({ pois: rows, total: count });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   r.get('/v1/catalog/:id', async (req, res) => {
     try {
       const item = await query(
@@ -656,6 +695,50 @@ export const buildCatalogRouter = () => {
         date_to,
         checked: results.length,
         results,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Home page collection carousels — curated featured items per type
+  r.get('/v1/catalog/collections/home', async (req, res) => {
+    try {
+      const LIMIT = 8;
+
+      const [hotels, experiences, transfers] = await Promise.all([
+        query(
+          `SELECT ${SELECT_FIELDS_PLAIN}
+           FROM hub_static_inventory
+           WHERE type = 'HOTEL' AND is_active = true AND canonical_id IS NULL
+           ORDER BY rating DESC NULLS LAST, review_count DESC NULLS LAST, last_synced_at DESC NULLS LAST
+           LIMIT $1`,
+          [LIMIT],
+        ),
+        query(
+          `SELECT ${SELECT_FIELDS_PLAIN}
+           FROM hub_static_inventory
+           WHERE type = 'EXPERIENCE' AND is_active = true AND canonical_id IS NULL
+           ORDER BY rating DESC NULLS LAST, review_count DESC NULLS LAST
+           LIMIT $1`,
+          [LIMIT],
+        ),
+        query(
+          `SELECT ${SELECT_FIELDS_PLAIN}
+           FROM hub_static_inventory
+           WHERE type = 'TRANSFER' AND is_active = true AND canonical_id IS NULL
+           ORDER BY RANDOM()
+           LIMIT $1`,
+          [LIMIT],
+        ),
+      ]);
+
+      res.json({
+        sections: [
+          { id: 'featured-hotels',      title: 'Popular Hotels',      type: 'HOTEL',      items: hotels.rows },
+          { id: 'top-experiences',      title: 'Top Experiences',     type: 'EXPERIENCE', items: experiences.rows },
+          { id: 'available-transfers',  title: 'Airport Transfers',   type: 'TRANSFER',   items: transfers.rows },
+        ],
       });
     } catch (e) {
       res.status(500).json({ error: e.message });

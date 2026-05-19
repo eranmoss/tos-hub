@@ -6,18 +6,21 @@ import AgentPanel from '../agent/AgentPanel.jsx';
 import { PageContextProvider } from '../agent/usePageContext.js';
 
 export default function Shell() {
-  const [agentOpen, setAgentOpen] = useState(false);
-  const [hasUnread, setHasUnread] = useState(false);
+  const [agentOpen,    setAgentOpen]    = useState(false);
+  const [hasUnread,    setHasUnread]    = useState(false);
+  const [sidebarOpen,  setSidebarOpen]  = useState(true);
 
   return (
     <PageContextProvider>
-      <div className="flex h-screen">
-        <Sidebar />
+      <div className="flex h-screen overflow-hidden">
+        <Sidebar open={sidebarOpen} onToggle={() => setSidebarOpen(v => !v)} />
         <div className="flex-1 flex flex-col min-w-0">
           <Topbar
             onToggleAgent={() => setAgentOpen((v) => !v)}
             agentOpen={agentOpen}
             hasUnread={hasUnread}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen(v => !v)}
           />
           <main className="flex-1 overflow-y-auto bg-page-bg">
             <Outlet />

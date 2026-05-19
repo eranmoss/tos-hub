@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TOS Travel Site</title>
+
+  <!--
+    1. Inject TOS_CONFIG BEFORE loading the bundle.
+       The bundle reads this at startup — order matters.
+  -->
+  <script>
+    window.TOS_CONFIG = {{ tos | tojson }};
+  </script>
+</head>
+<body>
+  <!--
+    2. The bundle mounts into #tos-root.
+       In router mode (pageSlug: null) the bundle owns all routing
+       under this element via history.pushState.
+  -->
+  <div id="tos-root"></div>
+
+  <!--
+    3. Load the self-contained IIFE bundle.
+       CSS is injected at runtime — no separate stylesheet needed.
+       Serve from your CDN or directly from this Flask app.
+  -->
+  <script src="/static/tos-frontend.js"></script>
+</body>
+</html>

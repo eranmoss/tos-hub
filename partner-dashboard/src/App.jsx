@@ -9,6 +9,8 @@ import Transactions from './pages/Transactions.jsx';
 import Intelligence from './pages/Intelligence.jsx';
 import Settings from './pages/Settings.jsx';
 import SystemLog from './pages/SystemLog.jsx';
+import Builder from './pages/Builder.jsx';
+import ComponentEditor from './pages/ComponentEditor.jsx';
 
 
 export default function App() {
@@ -23,6 +25,8 @@ export default function App() {
         <Route path="inventory" element={<Inventory />} />
         <Route path="transactions" element={<Transactions />} />
         <Route path="intelligence" element={<Intelligence />} />
+        <Route path="builder" element={<Builder />} />
+        <Route path="components" element={<ComponentEditor />} />
         <Route path="system-log" element={<SystemLog />} />
         <Route path="jobs" element={<Navigate to="/dashboard/system-log" replace />} />
         <Route path="settings" element={<Settings />} />
